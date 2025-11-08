@@ -1,0 +1,1 @@
+import{j as o}from"./jsx-runtime.DAjRlbsi.js";import"./index.DTjmqu0B.js";function i(){const r=()=>{const t=new Date,e=new Date("02/18/2004");var n=t.getFullYear()-e.getFullYear();const a=t.getMonth()-e.getMonth();return(a<0||a===0&&t.getDate()<e.getDate())&&n--,n};return o.jsx("span",{children:r()})}export{i as default};
