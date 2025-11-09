@@ -10,6 +10,7 @@ class DynamicProjects {
         this.excludeRepos = ['Omix01', 'omix01.github.io'];
         this.maxRetries = 3;
         this.isFetching = false;
+        this.hasInitialRender = false;
     }
 
     async fetchProjects(forceRefresh = false) {
@@ -19,6 +20,14 @@ class DynamicProjects {
                 return;
             }
 
+            // Show loading only on first load, not when using cache
+            if (!this.hasInitialRender && !forceRefresh) {
+                const cachedData = this.getCachedData();
+                if (!cachedData) {
+                    this.renderLoading();
+                }
+            }
+
             // Use cached data if available and not forcing refresh
             if (!forceRefresh) {
                 const cachedData = this.getCachedData();
@@ -26,6 +35,7 @@ class DynamicProjects {
                     console.info("💾 Loaded cached projects:", cachedData.length);
                     this.projects = cachedData;
                     this.render();
+                    this.hasInitialRender = true;
                     // Refresh in background without blocking
                     this.refreshInBackground();
                     return;
@@ -104,7 +114,6 @@ class DynamicProjects {
             const response = await fetch('https://api.github.com/users/Omix01/repos?sort=updated&per_page=100', {
                 headers: { 
                     Accept: 'application/vnd.github.mercy-preview+json',
-         
                 }
             });
 
@@ -122,6 +131,7 @@ class DynamicProjects {
                         console.info("🔄 Using cached data due to rate limiting");
                         this.projects = cachedData;
                         this.render();
+                        this.hasInitialRender = true;
                         this.showRateLimitWarning();
                         return;
                     }
@@ -156,6 +166,7 @@ class DynamicProjects {
                 this.setCachedData(this.projects);
                 console.info(`✅ Successfully fetched and stored ${this.projects.length} projects.`);
                 this.render();
+                this.hasInitialRender = true;
                 this.hideRateLimitWarning();
             } else {
                 console.warn("⚠️ Projects data invalid or empty, not caching.");
@@ -172,6 +183,7 @@ class DynamicProjects {
                     console.info("🔄 Using cached data as fallback after all retries failed");
                     this.projects = cachedData;
                     this.render();
+                    this.hasInitialRender = true;
                     this.showErrorWarning("Using cached data - some information may be outdated");
                     return;
                 }
@@ -561,7 +573,11 @@ class DynamicProjects {
     }
 
     init() {
-        this.renderLoading();
+        // Don't show loading if we have cached data - it will flash briefly
+        const cachedData = this.getCachedData();
+        if (!cachedData) {
+            this.renderLoading();
+        }
         this.fetchProjects();
     }
 }

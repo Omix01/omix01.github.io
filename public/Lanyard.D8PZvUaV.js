@@ -249,9 +249,8 @@ try {
 } catch {}
 
 function P({ hideStatus: t = false, hideLink: r = false }) {
-  const [initialData, setInitialData] = o.useState(lanyardCache.data);
+  const [data, setData] = o.useState(lanyardCache.data);
   const [lastSeenHistory, setLastSeenHistory] = o.useState(() => {
-    // Load last seen history from localStorage
     try {
       const history = localStorage.getItem("last_seen_history");
       return history ? JSON.parse(history) : {};
@@ -259,171 +258,147 @@ function P({ hideStatus: t = false, hideLink: r = false }) {
       return {};
     }
   });
-  const [currentTime, setCurrentTime] = o.useState(Date.now()); // Add this for real-time updates
+  const [currentTime, setCurrentTime] = o.useState(Date.now());
+
+  // Track previous status for comparison
+  const previousStatusRef = o.useRef(data?.discord_status);
 
   o.useEffect(() => {
     let cancelled = false;
 
-    // 1️⃣ Fetch REST once for first-time render if no cache
+    // Initial fetch if no cache
     if (!lanyardCache.data) {
-      fetch("https://api.lanyard.rest/v1/users/355915017381740544", {
-        headers: { Accept: "application/json" },
-      })
+      fetch("https://api.lanyard.rest/v1/users/355915017381740544")
         .then((res) => res.json())
-        .then((data) => {
+        .then((responseData) => {
           if (cancelled) return;
-          if (data?.data) {
-            lanyardCache.data = data.data;
-            setInitialData(data.data);
-            
-            // Update last seen history based on current status
-            updateLastSeenHistory(data.data);
-            
+          if (responseData?.data) {
+            lanyardCache.data = responseData.data;
+            setData(responseData.data);
             try {
-              localStorage.setItem("lanyard_data", JSON.stringify(data.data));
+              localStorage.setItem("lanyard_data", JSON.stringify(responseData.data));
             } catch {}
           }
         })
         .catch(() => {});
     }
 
-    // 2️⃣ Connect WebSocket for live updates
+    // WebSocket connection
     if (!lanyardCache.ws) {
       const ws = new WebSocket("wss://api.lanyard.rest/socket");
       lanyardCache.ws = ws;
-      let subscribed = false;
 
-      const handleMessage = (msg) => {
+      ws.addEventListener("message", (msg) => {
         const { op, t: type, d } = JSON.parse(msg.data);
 
-        if (op === 1 && !lanyardCache.heartbeat) {
-          lanyardCache.heartbeat = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ op: 3 }));
-          }, d.heartbeat_interval);
+        if (op === 1) {
+          // Heartbeat setup
+          if (!lanyardCache.heartbeat) {
+            lanyardCache.heartbeat = setInterval(() => {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ op: 3 }));
+              }
+            }, d.heartbeat_interval);
+          }
+          
+          // Subscribe to updates
+          ws.send(JSON.stringify({ 
+            op: 2, 
+            d: { subscribe_to_id: "355915017381740544" } 
+          }));
         }
 
-        if (op === 1 && !subscribed) {
-          ws.send(JSON.stringify({ op: 2, d: { subscribe_to_id: "355915017381740544" } }));
-          subscribed = true;
+        if (op === 0 && (type === "INIT_STATE" || type === "PRESENCE_UPDATE")) {
+          const previousStatus = previousStatusRef.current;
+          const currentStatus = d.discord_status;
+          
+          // SIMPLE AND RELIABLE: Update last seen when going offline/idle
+          if ((currentStatus === "offline" || currentStatus === "idle") && 
+              previousStatus && 
+              (previousStatus === "online" || previousStatus === "dnd")) {
+            
+            console.log("🔄 Status transition detected:", {
+              from: previousStatus,
+              to: currentStatus,
+              time: new Date().toLocaleTimeString()
+            });
+            
+            // Update last seen history
+            setLastSeenHistory(prev => {
+              const newHistory = {
+                ...prev,
+                [d.discord_user.id]: {
+                  timestamp: Date.now(),
+                  isRealData: true,
+                  fromStatus: previousStatus,
+                  toStatus: currentStatus
+                }
+              };
+              
+              try {
+                localStorage.setItem("last_seen_history", JSON.stringify(newHistory));
+              } catch {}
+              
+              return newHistory;
+            });
+          }
+          
+          // Update data and previous status reference
+          lanyardCache.data = d;
+          setData(d);
+          previousStatusRef.current = currentStatus;
+          
+          try {
+            localStorage.setItem("lanyard_data", JSON.stringify(d));
+          } catch {}
         }
-
-  if (op === 0 && (type === "INIT_STATE" || type === "PRESENCE_UPDATE")) {
-  const previousStatus = lanyardCache.data?.discord_status;
-  const currentStatus = d.discord_status;
-  
-  // Update cache immediately
-  lanyardCache.data = d;
-  setInitialData(d);
-  
-  // THEN check for transition
-  if ((currentStatus === "offline" || currentStatus === "idle") && 
-      previousStatus && 
-      previousStatus !== currentStatus &&
-      (previousStatus === "online" || previousStatus === "dnd")) {
-    updateLastSeenHistory(d, true, previousStatus); // ← FIX: Pass previousStatus as parameter
-  }
-  
-  try {
-    localStorage.setItem("lanyard_data", JSON.stringify(d));
-  } catch {}
-}
-      };
-
-      ws.addEventListener("message", handleMessage);
+      });
 
       ws.addEventListener("close", () => {
         clearInterval(lanyardCache.heartbeat);
         lanyardCache.heartbeat = null;
         lanyardCache.ws = null;
-        setTimeout(() => {
-          if (!lanyardCache.ws && !cancelled) P({ hideStatus: t, hideLink: r });
-        }, 1000);
+        
+        if (!cancelled) {
+          setTimeout(() => {
+            P({ hideStatus: t, hideLink: r });
+          }, 1000);
+        }
       });
-
-      return () => {
-        cancelled = true;
-        clearInterval(lanyardCache.heartbeat);
-        ws.close();
-        lanyardCache.ws = null;
-      };
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const e = N("355915017381740544", { initialData });
-
-  // REAL-TIME UPDATES: Update current time every second when user is offline/idle
+  // Real-time updates for offline/idle status
   o.useEffect(() => {
-    if (e && (e.discord_status === "offline" || e.discord_status === "idle")) {
+    if (data && (data.discord_status === "offline" || data.discord_status === "idle")) {
       const interval = setInterval(() => {
-        setCurrentTime(Date.now()); // This forces re-render every second
+        setCurrentTime(Date.now());
       }, 1000);
       
       return () => clearInterval(interval);
     }
-  }, [e?.discord_status]);
+  }, [data?.discord_status]);
 
-  // Function to update last seen history
-// Function to update last seen history - FIX THIS FUNCTION
-const updateLastSeenHistory = (data, isRealTransition = false, previousStatus = null) => {
-  const userId = data.discord_user?.id;
-  if (!userId) return;
-
-  setLastSeenHistory(prev => {
-    const newHistory = { ...prev };
-    const now = Date.now();
-    
-    if (isRealTransition) {
-      // We caught a real transition from online/dnd to offline/idle
-      newHistory[userId] = {
-        timestamp: now,
-        isRealData: true,
-        fromStatus: previousStatus, // ← FIX: Use the previousStatus passed as parameter
-        toStatus: data.discord_status
-      };
-      console.log("✅ Recorded REAL last seen time:", {
-        from: previousStatus, // ← FIX: Use previousStatus here too
-        to: data.discord_status,
-        time: new Date(now).toLocaleTimeString()
-      });
-    }
-    // NO fallback - we don't create fake data!
-    
-    // Save to localStorage
-    try {
-      localStorage.setItem("last_seen_history", JSON.stringify(newHistory));
-    } catch {}
-    
-    return newHistory;
-  });
-};
-
-  // Calculate last seen time - SMART VERSION WITH REAL-TIME UPDATES
+  // Calculate last seen text
   const getLastSeenText = () => {
-    if (!e) return null; // Don't show anything during loading
+    if (!data) return null;
     
-    const userId = e.discord_user?.id;
+    const userId = data.discord_user?.id;
     const lastSeenData = lastSeenHistory[userId];
     
-    // Only show if we have REAL data (caught the transition)
+    // Only show if we have real transition data
     if (!lastSeenData || !lastSeenData.isRealData) {
-      return "Last seen unavailable"; // Show this when we don't have real data
+      return "Last seen unavailable";
     }
     
     const lastSeenTimestamp = lastSeenData.timestamp;
-    const diffInSeconds = Math.floor((currentTime - lastSeenTimestamp) / 1000); // Use currentTime instead of Date.now()
+    const diffInSeconds = Math.floor((currentTime - lastSeenTimestamp) / 1000);
     const diffInMinutes = Math.floor(diffInSeconds / 60);
     
-    console.log("🕒 Real-time last seen:", {
-      lastSeen: new Date(lastSeenTimestamp).toLocaleTimeString(),
-      currentTime: new Date(currentTime).toLocaleTimeString(),
-      diffInSeconds,
-      diffInMinutes,
-      fromStatus: lastSeenData.fromStatus,
-      toStatus: lastSeenData.toStatus,
-      isRealData: true
-    });
-    
-    // Real timing based on actual caught data
     if (diffInSeconds < 60) return "Last seen just now";
     if (diffInMinutes === 1) return "Last seen 1 minute ago";
     if (diffInMinutes < 60) return `Last seen ${diffInMinutes} minutes ago`;
@@ -437,14 +412,7 @@ const updateLastSeenHistory = (data, isRealTransition = false, previousStatus = 
     return `Last seen ${diffInDays} days ago`;
   };
 
-  // Update history when data changes
-  o.useEffect(() => {
-    if (e) {
-      updateLastSeenHistory(e);
-    }
-  }, [e?.discord_status]);
-
-  // DRY loading placeholder
+  // Rest of your JSX rendering code remains the same...
   const renderLoading = (width = "w-28") => (
     s.jsxs("div", {
       className: `${width} animate-pulse`,
@@ -462,43 +430,40 @@ const updateLastSeenHistory = (data, isRealTransition = false, previousStatus = 
         s.jsx("div", {
           className: w(
             "flex h-full items-center gap-3 overflow-hidden rounded-3xl border border-white/10 px-3",
-            e?.discord_status ? I[e.discord_status] : "bg-white/5"
+            data?.discord_status ? I[data.discord_status] : "bg-white/5"
           ),
-          children: e
+          children: data
             ? s.jsxs(s.Fragment, {
                 children: [
                   s.jsx(p, { className: "h-8 w-8 shrink-0 fill-white" }),
                   s.jsxs("div", {
                     className: "flex flex-1 flex-col justify-center space-y-2",
                     children: [
-                      // Username section
                       s.jsxs("div", {
                         className: "flex items-baseline gap-2",
                         children: [
                           s.jsx("p", {
                             className: "text-lg font-semibold text-white",
-                            children: ["@", e.discord_user.username],
+                            children: ["@", data.discord_user.username],
                           }),
                           s.jsx("p", {
                             className: "text-sm text-gray-300",
-                            children: e.discord_status,
+                            children: data.discord_status,
                           }),
                         ],
                       }),
                       
-                      // Status text
-                      e.activities?.find(a => a.type === 4)?.state && 
+                      data.activities?.find(a => a.type === 4)?.state && 
                         s.jsx("p", {
                           className: "text-sm text-gray-200 italic",
-                          children: `"${e.activities.find(a => a.type === 4).state}"`,
+                          children: `"${data.activities.find(a => a.type === 4).state}"`,
                         }),
                       
-                      // Platform indicators - only when online
-                      e.discord_status === "online" && 
-                      (e.active_on_discord_web ||
-                       e.active_on_discord_desktop ||
-                       e.active_on_discord_mobile ||
-                       e.active_on_discord_embedded) &&
+                      data.discord_status === "online" && 
+                      (data.active_on_discord_web ||
+                       data.active_on_discord_desktop ||
+                       data.active_on_discord_mobile ||
+                       data.active_on_discord_embedded) &&
                         s.jsx("div", {
                           className: "flex items-center gap-1 pt-1",
                           children: [
@@ -510,10 +475,10 @@ const updateLastSeenHistory = (data, isRealTransition = false, previousStatus = 
                               className: "text-xs text-gray-300 font-medium",
                               children: [
                                 [
-                                  e.active_on_discord_web && "Web",
-                                  e.active_on_discord_desktop && "Desktop", 
-                                  e.active_on_discord_mobile && "Mobile",
-                                  e.active_on_discord_embedded && "Embedded",
+                                  data.active_on_discord_web && "Web",
+                                  data.active_on_discord_desktop && "Desktop", 
+                                  data.active_on_discord_mobile && "Mobile",
+                                  data.active_on_discord_embedded && "Embedded",
                                 ]
                                   .filter(Boolean)
                                   .join(" • "),
@@ -522,9 +487,8 @@ const updateLastSeenHistory = (data, isRealTransition = false, previousStatus = 
                           ],
                         }),
                       
-                      // SMART Last seen - only show when we have REAL data
-                      (e.discord_status === "offline" || e.discord_status === "idle") &&
-                        getLastSeenText() && // Only render if we have text to show
+                      (data.discord_status === "offline" || data.discord_status === "idle") &&
+                        getLastSeenText() &&
                         s.jsx("p", {
                           className: "text-xs text-gray-400 pt-1",
                           children: getLastSeenText(),
@@ -538,29 +502,30 @@ const updateLastSeenHistory = (data, isRealTransition = false, previousStatus = 
               }),
         }),
 
+      // Spotify section remains the same...
       s.jsx("a", {
-        href: e?.spotify?.track_id ? `https://open.spotify.com/track/${e.spotify.track_id}` : void 0,
+        href: data?.spotify?.track_id ? `https://open.spotify.com/track/${data.spotify.track_id}` : void 0,
         target: "_blank",
         className: w(
           "relative flex h-full items-center gap-3 overflow-hidden rounded-3xl border border-white/10 bg-white/5 px-3",
-          e?.spotify?.track_id && "transition-transform active:scale-95"
+          data?.spotify?.track_id && "transition-transform active:scale-95"
         ),
-        children: e
-          ? e.listening_to_spotify && e.spotify
+        children: data
+          ? data.listening_to_spotify && data.spotify
             ? s.jsxs(s.Fragment, {
                 children: [
                   s.jsx(u, { className: "h-8 w-8 shrink-0" }),
                   s.jsxs("div", {
                     className: "w-[75%]",
                     children: [
-                      s.jsx("p", { className: "text-md truncate font-bold", children: e.spotify.song }),
-                      s.jsxs("p", { className: "text-grey-300 truncate text-sm", children: ["by ", e.spotify.artist] }),
+                      s.jsx("p", { className: "text-md truncate font-bold", children: data.spotify.song }),
+                      s.jsxs("p", { className: "text-grey-300 truncate text-sm", children: ["by ", data.spotify.artist] }),
                     ],
                   }),
-                  !r && e.spotify.track_id && s.jsx(x, { className: "ml-auto mr-4 h-4 w-4 shrink-0" }),
-                  e.spotify.album_art_url &&
+                  !r && data.spotify.track_id && s.jsx(x, { className: "ml-auto mr-4 h-4 w-4 shrink-0" }),
+                  data.spotify.album_art_url &&
                     s.jsx("img", {
-                      src: e.spotify.album_art_url,
+                      src: data.spotify.album_art_url,
                       className:
                         "absolute left-0 top-0 -z-10 h-full w-full object-cover object-center blur-sm brightness-75 transition-all duration-100",
                     }),
