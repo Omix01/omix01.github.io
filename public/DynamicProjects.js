@@ -4,111 +4,255 @@ class DynamicProjects {
         this.container = document.getElementById(containerId);
         this.projects = [];
         this.cacheKey = "github_repos_cache_v1";
+        this.cacheTimestampKey = "github_repos_cache_timestamp";
+        this.cacheMaxAge = 5 * 60 * 1000; // 5 minutes cache
         this.alwaysIncludeRepos = ['whatsapp-web.js-my-enhancements'];
         this.excludeRepos = ['Omix01', 'omix01.github.io'];
         this.maxRetries = 3;
+        this.isFetching = false;
     }
 
-async fetchProjects(forceRefresh = false) {
-    try {
-        if (!this.container) {
-            console.error("❌ [DynamicProjects] Container element not found for:", this.containerId);
+    async fetchProjects(forceRefresh = false) {
+        try {
+            if (!this.container) {
+                console.error("❌ [DynamicProjects] Container element not found for:", this.containerId);
+                return;
+            }
+
+            // Use cached data if available and not forcing refresh
+            if (!forceRefresh) {
+                const cachedData = this.getCachedData();
+                if (cachedData) {
+                    console.info("💾 Loaded cached projects:", cachedData.length);
+                    this.projects = cachedData;
+                    this.render();
+                    // Refresh in background without blocking
+                    this.refreshInBackground();
+                    return;
+                }
+            }
+
+            await this.tryFetchWithRetry();
+        } catch (error) {
+            console.error("❌ Failed to fetch or render:", error);
+            this.renderError("Failed to load projects. Please try again later.");
+        }
+    }
+
+    getCachedData() {
+        try {
+            const cached = localStorage.getItem(this.cacheKey);
+            const timestamp = localStorage.getItem(this.cacheTimestampKey);
+            
+            if (!cached || !timestamp) {
+                return null;
+            }
+
+            const cacheAge = Date.now() - parseInt(timestamp);
+            if (cacheAge > this.cacheMaxAge) {
+                console.info("🕒 Cache expired, fetching fresh data");
+                return null;
+            }
+
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+                return parsed;
+            } else {
+                console.warn("⚠️ Cache is empty or invalid");
+                return null;
+            }
+        } catch (parseErr) {
+            console.error("❌ Cache corrupted:", parseErr);
+            this.clearCache();
+            return null;
+        }
+    }
+
+    setCachedData(data) {
+        try {
+            if (Array.isArray(data) && data.length > 0) {
+                localStorage.setItem(this.cacheKey, JSON.stringify(data));
+                localStorage.setItem(this.cacheTimestampKey, Date.now().toString());
+                console.info(`✅ Successfully cached ${data.length} projects`);
+            }
+        } catch (err) {
+            console.warn("⚠️ Could not save to localStorage:", err);
+        }
+    }
+
+    clearCache() {
+        try {
+            localStorage.removeItem(this.cacheKey);
+            localStorage.removeItem(this.cacheTimestampKey);
+        } catch (err) {
+            console.warn("⚠️ Could not clear cache:", err);
+        }
+    }
+
+    async tryFetchWithRetry(retry = 0) {
+        // Prevent multiple simultaneous fetches
+        if (this.isFetching) {
+            console.log("⏳ Fetch already in progress, skipping...");
             return;
         }
 
-        // Use cached data if available
-        if (!forceRefresh) {
-            const cached = localStorage.getItem(this.cacheKey);
-            if (cached) {
-                try {
-                    const parsed = JSON.parse(cached);
-                    if (Array.isArray(parsed) && parsed.length > 0) {
-                        console.info("💾 Loaded cached projects:", parsed.length);
-                        this.projects = parsed;
+        this.isFetching = true;
+
+        try {
+            console.log(`🔍 Fetch attempt ${retry + 1}/${this.maxRetries}`);
+            
+            const response = await fetch('https://api.github.com/users/Omix01/repos?sort=updated&per_page=100', {
+                headers: { 
+                    Accept: 'application/vnd.github.mercy-preview+json',
+         
+                }
+            });
+
+            if (!response.ok) {
+                // Handle rate limiting specifically
+                if (response.status === 403 || response.status === 429) {
+                    const rateLimitReset = response.headers.get('X-RateLimit-Reset');
+                    const retryAfter = response.headers.get('Retry-After');
+                    
+                    console.warn(`⚠️ Rate limited. Reset: ${rateLimitReset}, Retry-After: ${retryAfter}`);
+                    
+                    // If we have cached data, use it and show warning
+                    const cachedData = this.getCachedData();
+                    if (cachedData) {
+                        console.info("🔄 Using cached data due to rate limiting");
+                        this.projects = cachedData;
                         this.render();
-                        this.refreshInBackground();
+                        this.showRateLimitWarning();
                         return;
-                    } else {
-                        console.warn("⚠️ Cache is empty or invalid:", parsed);
                     }
-                } catch (parseErr) {
-                    console.error("❌ Cache corrupted:", parseErr);
-                    localStorage.removeItem(this.cacheKey);
+                    
+                    throw new Error(`GitHub API rate limited. Status: ${response.status}`);
+                }
+                throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
+            }
+
+            const repos = await response.json();
+
+            if (!Array.isArray(repos) || repos.length === 0) {
+                throw new Error("Empty repos list returned from GitHub API");
+            }
+
+            const filteredRepos = [
+                ...repos.filter(repo => this.alwaysIncludeRepos.includes(repo.name)),
+                ...repos.filter(repo => this.shouldIncludeRepo(repo) && !this.alwaysIncludeRepos.includes(repo.name))
+            ].slice(0, 6);
+
+            if (filteredRepos.length === 0) {
+                throw new Error("Filtered repos list is empty");
+            }
+
+            const projectsWithDetails = await Promise.all(
+                filteredRepos.map(repo => this.getRepoWithDetails(repo))
+            );
+
+            // ✅ Only save valid non-empty data
+            if (Array.isArray(projectsWithDetails) && projectsWithDetails.length > 0) {
+                this.projects = projectsWithDetails;
+                this.setCachedData(this.projects);
+                console.info(`✅ Successfully fetched and stored ${this.projects.length} projects.`);
+                this.render();
+                this.hideRateLimitWarning();
+            } else {
+                console.warn("⚠️ Projects data invalid or empty, not caching.");
+                throw new Error("Projects data invalid or empty");
+            }
+
+        } catch (err) {
+            console.error(`❌ Fetch attempt ${retry + 1} failed:`, err);
+
+            // On last retry, try to use cached data as fallback
+            if (retry === this.maxRetries - 1) {
+                const cachedData = this.getCachedData();
+                if (cachedData) {
+                    console.info("🔄 Using cached data as fallback after all retries failed");
+                    this.projects = cachedData;
+                    this.render();
+                    this.showErrorWarning("Using cached data - some information may be outdated");
+                    return;
                 }
             }
-        }
 
-        await this.tryFetchWithRetry();
-    } catch (error) {
-        console.error("❌ Failed to fetch or render:", error);
-        this.renderError();
+            if (retry < this.maxRetries) {
+                const delay = 1500 * (retry + 1);
+                console.warn(`⚠️ Retrying in ${delay}ms...`);
+                await new Promise(res => setTimeout(res, delay));
+                return this.tryFetchWithRetry(retry + 1);
+            }
+
+            // Final fallback - render error
+            console.error("❌ All retries failed, no cached data available");
+            this.renderError("Unable to load projects. Please check your connection and try again.");
+        } finally {
+            this.isFetching = false;
+        }
     }
-}
 
-async tryFetchWithRetry(retry = 0) {
-    try {
-        console.log(`🔍 Fetch attempt ${retry + 1}/${this.maxRetries}`);
-        const response = await fetch('https://api.github.com/users/Omix01/repos?sort=updated&per_page=100', {
-            headers: { Accept: 'application/vnd.github.mercy-preview+json' }
-        });
-
-        if (!response.ok) throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
-
-        const repos = await response.json();
-
-        if (!Array.isArray(repos) || repos.length === 0) {
-            throw new Error("Empty repos list returned from GitHub API");
+    showRateLimitWarning() {
+        // Create or update a warning banner
+        let warningBanner = document.getElementById('rate-limit-warning');
+        if (!warningBanner) {
+            warningBanner = document.createElement('div');
+            warningBanner.id = 'rate-limit-warning';
+            warningBanner.className = 'mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 text-sm';
+            warningBanner.innerHTML = `
+                <div class="flex items-center">
+                    <svg class="w-4 h-4 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                    </svg>
+                    <span>GitHub API rate limit exceeded. Showing cached data.</span>
+                </div>
+            `;
+            this.container.parentNode.insertBefore(warningBanner, this.container);
         }
-
-        const filteredRepos = [
-            ...repos.filter(repo => this.alwaysIncludeRepos.includes(repo.name)),
-            ...repos.filter(repo => this.shouldIncludeRepo(repo) && !this.alwaysIncludeRepos.includes(repo.name))
-        ].slice(0, 6);
-
-        if (filteredRepos.length === 0) {
-            throw new Error("Filtered repos list is empty");
-        }
-
-        const projectsWithDetails = await Promise.all(
-            filteredRepos.map(repo => this.getRepoWithDetails(repo))
-        );
-
-        // ✅ Only save valid non-empty data
-        if (Array.isArray(projectsWithDetails) && projectsWithDetails.length > 0) {
-            this.projects = projectsWithDetails;
-            localStorage.setItem(this.cacheKey, JSON.stringify(this.projects));
-            console.info(`✅ Successfully fetched and stored ${this.projects.length} projects.`);
-            this.render();
-        } else {
-            console.warn("⚠️ Projects data invalid or empty, not caching.");
-            throw new Error("Projects data invalid or empty");
-        }
-
-    } catch (err) {
-        if (retry < this.maxRetries) {
-            console.warn(`⚠️ Retry ${retry + 1}/${this.maxRetries} due to error:`, err);
-            await new Promise(res => setTimeout(res, 1500 * (retry + 1)));
-            return this.tryFetchWithRetry(retry + 1);
-        }
-
-        console.error("❌ All retries failed:", err);
-        // 🧹 Only clear cache if it was possibly bad
-        localStorage.removeItem(this.cacheKey);
-        this.renderError();
     }
-}
 
+    showErrorWarning(message) {
+        let warningBanner = document.getElementById('error-warning');
+        if (!warningBanner) {
+            warningBanner = document.createElement('div');
+            warningBanner.id = 'error-warning';
+            warningBanner.className = 'mb-4 p-3 bg-orange-50 border border-orange-200 rounded-lg text-orange-800 text-sm';
+            warningBanner.innerHTML = `
+                <div class="flex items-center">
+                    <svg class="w-4 h-4 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                        <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                    </svg>
+                    <span>${message}</span>
+                </div>
+            `;
+            this.container.parentNode.insertBefore(warningBanner, this.container);
+        }
+    }
 
-
+    hideRateLimitWarning() {
+        const warningBanner = document.getElementById('rate-limit-warning');
+        if (warningBanner) {
+            warningBanner.remove();
+        }
+    }
 
     async refreshInBackground() {
         // Non-blocking background refresh to keep data live
-        this.tryFetchWithRetry();
+        if (!this.isFetching) {
+            setTimeout(() => this.tryFetchWithRetry(), 1000);
+        }
     }
 
     async getRepoWithDetails(repo) {
         try {
-            const languagesResponse = await fetch(repo.languages_url);
+            const languagesResponse = await fetch(repo.languages_url, {
+                headers: { 'Cache-Control': 'max-age=300' }
+            });
+            
+            if (!languagesResponse.ok) {
+                throw new Error(`Languages fetch failed: ${languagesResponse.status}`);
+            }
+            
             const languages = await languagesResponse.json();
 
             const totalBytes = Object.values(languages).reduce((sum, bytes) => sum + bytes, 0);
@@ -177,27 +321,26 @@ async tryFetchWithRetry(retry = 0) {
         return `${Math.floor(diffInSeconds / 31536000)}y ago`;
     }
 
+    render() {
+        if (!this.container) {
+            console.error("❌ Render failed — container not found!");
+            return;
+        }
 
-render() {
-    if (!this.container) {
-        console.error("❌ Render failed — container not found!");
-        return;
-    }
+        if (!this.projects || this.projects.length === 0) {
+            console.error("❌ Render failed — no projects to display.");
+            this.renderError("No projects available to display.");
+            return;
+        }
 
-    if (!this.projects || this.projects.length === 0) {
-        console.error("❌ Render failed — no projects to display.");
-        this.renderError();
-        return;
+        try {
+            this.container.innerHTML = this.projects.map(p => this.renderProject(p)).join('');
+            console.log(`🎨 Rendered ${this.projects.length} projects successfully.`);
+        } catch (err) {
+            console.error("❌ Error during rendering:", err);
+            this.renderError("Error rendering projects.");
+        }
     }
-
-    try {
-        this.container.innerHTML = this.projects.map(p => this.renderProject(p)).join('');
-        console.log(`🎨 Rendered ${this.projects.length} projects successfully.`);
-    } catch (err) {
-        console.error("❌ Error during rendering:", err);
-        this.renderError();
-    }
-}
 
     renderProject(project) {
         return `
@@ -363,7 +506,7 @@ render() {
             .replace(/\./g, ' ');
     }
 
-    renderError() {
+    renderError(message = "Unable to load projects") {
         if (!this.container) return;
         
         this.container.innerHTML = `
@@ -372,9 +515,9 @@ render() {
                     <svg class="h-12 w-12 text-gray-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
                     </svg>
-                    <h3 class="text-lg font-medium text-gray-900 mb-2">Unable to load projects</h3>
+                    <h3 class="text-lg font-medium text-gray-900 mb-2">${message}</h3>
                     <p class="text-gray-600 mb-4">Please check your connection and try again.</p>
-                    <button onclick="window.dynamicProjects.fetchProjects()" 
+                    <button onclick="window.dynamicProjects.fetchProjects(true)" 
                             class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
                         Try Again
                     </button>

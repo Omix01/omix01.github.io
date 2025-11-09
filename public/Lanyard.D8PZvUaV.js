@@ -234,6 +234,8 @@ function w() {
     offline: "bg-white/5 text-gray-400",
   };
 // Persistent cache outside the component (shared between renders)
+
+
 const lanyardCache = {
   data: null,
   ws: null,
@@ -248,6 +250,16 @@ try {
 
 function P({ hideStatus: t = false, hideLink: r = false }) {
   const [initialData, setInitialData] = o.useState(lanyardCache.data);
+  const [lastSeenHistory, setLastSeenHistory] = o.useState(() => {
+    // Load last seen history from localStorage
+    try {
+      const history = localStorage.getItem("last_seen_history");
+      return history ? JSON.parse(history) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [currentTime, setCurrentTime] = o.useState(Date.now()); // Add this for real-time updates
 
   o.useEffect(() => {
     let cancelled = false;
@@ -263,6 +275,10 @@ function P({ hideStatus: t = false, hideLink: r = false }) {
           if (data?.data) {
             lanyardCache.data = data.data;
             setInitialData(data.data);
+            
+            // Update last seen history based on current status
+            updateLastSeenHistory(data.data);
+            
             try {
               localStorage.setItem("lanyard_data", JSON.stringify(data.data));
             } catch {}
@@ -291,15 +307,26 @@ function P({ hideStatus: t = false, hideLink: r = false }) {
           subscribed = true;
         }
 
-        if (op === 0 && (type === "INIT_STATE" || type === "PRESENCE_UPDATE")) {
-          if (JSON.stringify(lanyardCache.data) !== JSON.stringify(d)) {
-            lanyardCache.data = d;
-            setInitialData(d);
-            try {
-              localStorage.setItem("lanyard_data", JSON.stringify(d));
-            } catch {}
-          }
-        }
+  if (op === 0 && (type === "INIT_STATE" || type === "PRESENCE_UPDATE")) {
+  const previousStatus = lanyardCache.data?.discord_status;
+  const currentStatus = d.discord_status;
+  
+  // Update cache immediately
+  lanyardCache.data = d;
+  setInitialData(d);
+  
+  // THEN check for transition
+  if ((currentStatus === "offline" || currentStatus === "idle") && 
+      previousStatus && 
+      previousStatus !== currentStatus &&
+      (previousStatus === "online" || previousStatus === "dnd")) {
+    updateLastSeenHistory(d, true, previousStatus); // ← FIX: Pass previousStatus as parameter
+  }
+  
+  try {
+    localStorage.setItem("lanyard_data", JSON.stringify(d));
+  } catch {}
+}
       };
 
       ws.addEventListener("message", handleMessage);
@@ -323,6 +350,99 @@ function P({ hideStatus: t = false, hideLink: r = false }) {
   }, []);
 
   const e = N("355915017381740544", { initialData });
+
+  // REAL-TIME UPDATES: Update current time every second when user is offline/idle
+  o.useEffect(() => {
+    if (e && (e.discord_status === "offline" || e.discord_status === "idle")) {
+      const interval = setInterval(() => {
+        setCurrentTime(Date.now()); // This forces re-render every second
+      }, 1000);
+      
+      return () => clearInterval(interval);
+    }
+  }, [e?.discord_status]);
+
+  // Function to update last seen history
+// Function to update last seen history - FIX THIS FUNCTION
+const updateLastSeenHistory = (data, isRealTransition = false, previousStatus = null) => {
+  const userId = data.discord_user?.id;
+  if (!userId) return;
+
+  setLastSeenHistory(prev => {
+    const newHistory = { ...prev };
+    const now = Date.now();
+    
+    if (isRealTransition) {
+      // We caught a real transition from online/dnd to offline/idle
+      newHistory[userId] = {
+        timestamp: now,
+        isRealData: true,
+        fromStatus: previousStatus, // ← FIX: Use the previousStatus passed as parameter
+        toStatus: data.discord_status
+      };
+      console.log("✅ Recorded REAL last seen time:", {
+        from: previousStatus, // ← FIX: Use previousStatus here too
+        to: data.discord_status,
+        time: new Date(now).toLocaleTimeString()
+      });
+    }
+    // NO fallback - we don't create fake data!
+    
+    // Save to localStorage
+    try {
+      localStorage.setItem("last_seen_history", JSON.stringify(newHistory));
+    } catch {}
+    
+    return newHistory;
+  });
+};
+
+  // Calculate last seen time - SMART VERSION WITH REAL-TIME UPDATES
+  const getLastSeenText = () => {
+    if (!e) return null; // Don't show anything during loading
+    
+    const userId = e.discord_user?.id;
+    const lastSeenData = lastSeenHistory[userId];
+    
+    // Only show if we have REAL data (caught the transition)
+    if (!lastSeenData || !lastSeenData.isRealData) {
+      return "Last seen unavailable"; // Show this when we don't have real data
+    }
+    
+    const lastSeenTimestamp = lastSeenData.timestamp;
+    const diffInSeconds = Math.floor((currentTime - lastSeenTimestamp) / 1000); // Use currentTime instead of Date.now()
+    const diffInMinutes = Math.floor(diffInSeconds / 60);
+    
+    console.log("🕒 Real-time last seen:", {
+      lastSeen: new Date(lastSeenTimestamp).toLocaleTimeString(),
+      currentTime: new Date(currentTime).toLocaleTimeString(),
+      diffInSeconds,
+      diffInMinutes,
+      fromStatus: lastSeenData.fromStatus,
+      toStatus: lastSeenData.toStatus,
+      isRealData: true
+    });
+    
+    // Real timing based on actual caught data
+    if (diffInSeconds < 60) return "Last seen just now";
+    if (diffInMinutes === 1) return "Last seen 1 minute ago";
+    if (diffInMinutes < 60) return `Last seen ${diffInMinutes} minutes ago`;
+    
+    const diffInHours = Math.floor(diffInMinutes / 60);
+    if (diffInHours === 1) return "Last seen 1 hour ago";
+    if (diffInHours < 24) return `Last seen ${diffInHours} hours ago`;
+    
+    const diffInDays = Math.floor(diffInHours / 24);
+    if (diffInDays === 1) return "Last seen 1 day ago";
+    return `Last seen ${diffInDays} days ago`;
+  };
+
+  // Update history when data changes
+  o.useEffect(() => {
+    if (e) {
+      updateLastSeenHistory(e);
+    }
+  }, [e?.discord_status]);
 
   // DRY loading placeholder
   const renderLoading = (width = "w-28") => (
@@ -349,14 +469,73 @@ function P({ hideStatus: t = false, hideLink: r = false }) {
                 children: [
                   s.jsx(p, { className: "h-8 w-8 shrink-0 fill-white" }),
                   s.jsxs("div", {
+                    className: "flex flex-1 flex-col justify-center space-y-2",
                     children: [
-                      s.jsxs("p", { className: "text-md font-bold text-white", children: ["@", e.discord_user.username] }),
-                      s.jsx("p", { className: "text-sm", children: e.discord_status }),
+                      // Username section
+                      s.jsxs("div", {
+                        className: "flex items-baseline gap-2",
+                        children: [
+                          s.jsx("p", {
+                            className: "text-lg font-semibold text-white",
+                            children: ["@", e.discord_user.username],
+                          }),
+                          s.jsx("p", {
+                            className: "text-sm text-gray-300",
+                            children: e.discord_status,
+                          }),
+                        ],
+                      }),
+                      
+                      // Status text
+                      e.activities?.find(a => a.type === 4)?.state && 
+                        s.jsx("p", {
+                          className: "text-sm text-gray-200 italic",
+                          children: `"${e.activities.find(a => a.type === 4).state}"`,
+                        }),
+                      
+                      // Platform indicators - only when online
+                      e.discord_status === "online" && 
+                      (e.active_on_discord_web ||
+                       e.active_on_discord_desktop ||
+                       e.active_on_discord_mobile ||
+                       e.active_on_discord_embedded) &&
+                        s.jsx("div", {
+                          className: "flex items-center gap-1 pt-1",
+                          children: [
+                            s.jsx("span", {
+                              className: "text-xs text-gray-400",
+                              children: "Active on:",
+                            }),
+                            s.jsxs("span", {
+                              className: "text-xs text-gray-300 font-medium",
+                              children: [
+                                [
+                                  e.active_on_discord_web && "Web",
+                                  e.active_on_discord_desktop && "Desktop", 
+                                  e.active_on_discord_mobile && "Mobile",
+                                  e.active_on_discord_embedded && "Embedded",
+                                ]
+                                  .filter(Boolean)
+                                  .join(" • "),
+                              ],
+                            }),
+                          ],
+                        }),
+                      
+                      // SMART Last seen - only show when we have REAL data
+                      (e.discord_status === "offline" || e.discord_status === "idle") &&
+                        getLastSeenText() && // Only render if we have text to show
+                        s.jsx("p", {
+                          className: "text-xs text-gray-400 pt-1",
+                          children: getLastSeenText(),
+                        }),
                     ],
                   }),
                 ],
               })
-            : s.jsxs(s.Fragment, { children: [s.jsx(p, { className: "h-8 w-8 shrink-0" }), renderLoading()] }),
+            : s.jsxs(s.Fragment, {
+                children: [s.jsx(p, { className: "h-8 w-8 shrink-0" }), renderLoading()],
+              }),
         }),
 
       s.jsx("a", {
