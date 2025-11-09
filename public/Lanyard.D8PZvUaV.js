@@ -233,21 +233,116 @@ function w() {
     dnd: "bg-red-400/10 text-red-400",
     offline: "bg-white/5 text-gray-400",
   };
-function P({ hideStatus: t = !1, hideLink: r = !1 }) {
-  const e = N("355915017381740544");
+// Persistent cache outside the component (shared between renders)
+const lanyardCache = {
+  data: null,
+  ws: null,
+  heartbeat: null,
+};
+
+// Restore cached data if available
+try {
+  const cached = localStorage.getItem("lanyard_data");
+  if (cached) lanyardCache.data = JSON.parse(cached);
+} catch {}
+
+function P({ hideStatus: t = false, hideLink: r = false }) {
+  const [initialData, setInitialData] = o.useState(lanyardCache.data);
+
+  o.useEffect(() => {
+    let cancelled = false;
+
+    // 1️⃣ Fetch REST once for first-time render if no cache
+    if (!lanyardCache.data) {
+      fetch("https://api.lanyard.rest/v1/users/355915017381740544", {
+        headers: { Accept: "application/json" },
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (cancelled) return;
+          if (data?.data) {
+            lanyardCache.data = data.data;
+            setInitialData(data.data);
+            try {
+              localStorage.setItem("lanyard_data", JSON.stringify(data.data));
+            } catch {}
+          }
+        })
+        .catch(() => {});
+    }
+
+    // 2️⃣ Connect WebSocket for live updates
+    if (!lanyardCache.ws) {
+      const ws = new WebSocket("wss://api.lanyard.rest/socket");
+      lanyardCache.ws = ws;
+      let subscribed = false;
+
+      const handleMessage = (msg) => {
+        const { op, t: type, d } = JSON.parse(msg.data);
+
+        if (op === 1 && !lanyardCache.heartbeat) {
+          lanyardCache.heartbeat = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ op: 3 }));
+          }, d.heartbeat_interval);
+        }
+
+        if (op === 1 && !subscribed) {
+          ws.send(JSON.stringify({ op: 2, d: { subscribe_to_id: "355915017381740544" } }));
+          subscribed = true;
+        }
+
+        if (op === 0 && (type === "INIT_STATE" || type === "PRESENCE_UPDATE")) {
+          if (JSON.stringify(lanyardCache.data) !== JSON.stringify(d)) {
+            lanyardCache.data = d;
+            setInitialData(d);
+            try {
+              localStorage.setItem("lanyard_data", JSON.stringify(d));
+            } catch {}
+          }
+        }
+      };
+
+      ws.addEventListener("message", handleMessage);
+
+      ws.addEventListener("close", () => {
+        clearInterval(lanyardCache.heartbeat);
+        lanyardCache.heartbeat = null;
+        lanyardCache.ws = null;
+        setTimeout(() => {
+          if (!lanyardCache.ws && !cancelled) P({ hideStatus: t, hideLink: r });
+        }, 1000);
+      });
+
+      return () => {
+        cancelled = true;
+        clearInterval(lanyardCache.heartbeat);
+        ws.close();
+        lanyardCache.ws = null;
+      };
+    }
+  }, []);
+
+  const e = N("355915017381740544", { initialData });
+
+  // DRY loading placeholder
+  const renderLoading = (width = "w-28") => (
+    s.jsxs("div", {
+      className: `${width} animate-pulse`,
+      children: [
+        s.jsx("div", { className: "mt-1 h-4 w-full overflow-hidden rounded-md bg-white/10" }),
+        s.jsx("div", { className: "mt-1 h-4 w-2/3 overflow-hidden rounded-md bg-white/10" }),
+      ],
+    })
+  );
+
   return s.jsxs("div", {
     className: "flex h-full flex-col justify-stretch gap-5",
     children: [
       !t &&
-        s.jsx("a", {
-          href: e?.discord_user.id
-            ? `https://discord.com/users/${e.discord_user.id}`
-            : void 0,
-          target: "_blank",
+        s.jsx("div", {
           className: w(
             "flex h-full items-center gap-3 overflow-hidden rounded-3xl border border-white/10 px-3",
-            e?.discord_status ? I[e.discord_status] : "bg-white/5",
-            e?.discord_user.id && "transition-transform active:scale-95"
+            e?.discord_status ? I[e.discord_status] : "bg-white/5"
           ),
           children: e
             ? s.jsxs(s.Fragment, {
@@ -255,44 +350,17 @@ function P({ hideStatus: t = !1, hideLink: r = !1 }) {
                   s.jsx(p, { className: "h-8 w-8 shrink-0 fill-white" }),
                   s.jsxs("div", {
                     children: [
-                      s.jsxs("p", {
-                        className: "text-md font-bold text-white",
-                        children: ["@", e.discord_user.username],
-                      }),
-                      s.jsx("p", {
-                        className: "text-sm",
-                        children: e.discord_status,
-                      }),
+                      s.jsxs("p", { className: "text-md font-bold text-white", children: ["@", e.discord_user.username] }),
+                      s.jsx("p", { className: "text-sm", children: e.discord_status }),
                     ],
-                  }),
-                  s.jsx(x, {
-                    className: "ml-auto mr-4 h-4 w-4 shrink-0 text-white",
                   }),
                 ],
               })
-            : s.jsxs(s.Fragment, {
-                children: [
-                  s.jsx(p, { className: "h-8 w-8 shrink-0" }),
-                  s.jsxs("div", {
-                    className: "w-28 animate-pulse",
-                    children: [
-                      s.jsx("div", {
-                        className:
-                          "mt-1 h-4 w-full overflow-hidden rounded-md bg-white/10",
-                      }),
-                      s.jsx("div", {
-                        className:
-                          "mt-1 h-4 w-2/3 overflow-hidden rounded-md bg-white/10",
-                      }),
-                    ],
-                  }),
-                ],
-              }),
+            : s.jsxs(s.Fragment, { children: [s.jsx(p, { className: "h-8 w-8 shrink-0" }), renderLoading()] }),
         }),
+
       s.jsx("a", {
-        href: e?.spotify?.track_id
-          ? `https://open.spotify.com/track/${e.spotify.track_id}`
-          : void 0,
+        href: e?.spotify?.track_id ? `https://open.spotify.com/track/${e.spotify.track_id}` : void 0,
         target: "_blank",
         className: w(
           "relative flex h-full items-center gap-3 overflow-hidden rounded-3xl border border-white/10 bg-white/5 px-3",
@@ -306,56 +374,29 @@ function P({ hideStatus: t = !1, hideLink: r = !1 }) {
                   s.jsxs("div", {
                     className: "w-[75%]",
                     children: [
-                      s.jsx("p", {
-                        className: "text-md truncate font-bold",
-                        children: e.spotify.song,
-                      }),
-                      s.jsxs("p", {
-                        className: "text-grey-300 truncate text-sm",
-                        children: ["by ", e.spotify.artist],
-                      }),
+                      s.jsx("p", { className: "text-md truncate font-bold", children: e.spotify.song }),
+                      s.jsxs("p", { className: "text-grey-300 truncate text-sm", children: ["by ", e.spotify.artist] }),
                     ],
                   }),
-                  !r &&
-                    e.spotify.track_id &&
-                    s.jsx(x, { className: "ml-auto mr-4 h-4 w-4 shrink-0" }),
+                  !r && e.spotify.track_id && s.jsx(x, { className: "ml-auto mr-4 h-4 w-4 shrink-0" }),
                   e.spotify.album_art_url &&
                     s.jsx("img", {
                       src: e.spotify.album_art_url,
                       className:
-                        "absolute left-0 top-0 -z-10 h-full w-full object-cover object-center blur brightness-50",
+                        "absolute left-0 top-0 -z-10 h-full w-full object-cover object-center blur-sm brightness-75 transition-all duration-100",
                     }),
                 ],
               })
             : s.jsxs(s.Fragment, {
                 children: [
                   s.jsx(u, { className: "h-8 w-8 shrink-0" }),
-                  s.jsx("p", {
-                    className: "text-md font-bold leading-tight",
-                    children: "Nothing Playing",
-                  }),
+                  s.jsx("p", { className: "text-md font-bold leading-tight", children: "Nothing Playing" }),
                 ],
               })
-          : s.jsxs(s.Fragment, {
-              children: [
-                s.jsx(u, { className: "h-8 w-8 shrink-0" }),
-                s.jsxs("div", {
-                  className: "w-28 animate-pulse",
-                  children: [
-                    s.jsx("div", {
-                      className:
-                        "mt-1 h-4 w-full overflow-hidden rounded-md bg-white/10",
-                    }),
-                    s.jsx("div", {
-                      className:
-                        "mt-1 h-4 w-2/3 overflow-hidden rounded-md bg-white/10",
-                    }),
-                  ],
-                }),
-              ],
-            }),
+          : s.jsxs(s.Fragment, { children: [s.jsx(u, { className: "h-8 w-8 shrink-0" }), renderLoading()] }),
       }),
     ],
   });
 }
+
 export { P as default };
