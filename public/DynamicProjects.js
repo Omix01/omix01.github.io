@@ -255,45 +255,47 @@ class DynamicProjects {
         }
     }
 
-    async getRepoWithDetails(repo) {
-        try {
-            const languagesResponse = await fetch(repo.languages_url, {
-                headers: { 'Cache-Control': 'max-age=300' }
-            });
-            
-            if (!languagesResponse.ok) {
-                throw new Error(`Languages fetch failed: ${languagesResponse.status}`);
-            }
-            
-            const languages = await languagesResponse.json();
-
-            const totalBytes = Object.values(languages).reduce((sum, bytes) => sum + bytes, 0);
-            const languagesWithPercentages = Object.entries(languages)
-                .map(([language, bytes]) => ({
-                    language,
-                    percentage: totalBytes ? ((bytes / totalBytes) * 100).toFixed(1) : 0
-                }))
-                .sort((a, b) => b.percentage - a.percentage)
-                .slice(0, 2);
-
-            return {
-                name: repo.name,
-                description: repo.description || 'No description available',
-                html_url: this.getRepoUrlWithBranch(repo),
-                homepage: repo.homepage,
-                languages: languagesWithPercentages,
-                topics: repo.topics || [],
-                stargazers_count: repo.stargazers_count,
-                updated_at: repo.updated_at,
-                pushed_at: repo.pushed_at,
-                is_fork: repo.fork,
-                size: repo.size
-            };
-        } catch (error) {
-            console.warn("Language fetch failed for", repo.name, error);
-            return this.mapRepoToProject(repo);
+async getRepoWithDetails(repo) {
+    try {
+        // ✅ Use only Accept header, remove Cache-Control
+        const languagesResponse = await fetch(repo.languages_url, {
+            headers: { Accept: 'application/vnd.github.mercy-preview+json' }
+        });
+        
+        if (!languagesResponse.ok) {
+            throw new Error(`Languages fetch failed: ${languagesResponse.status}`);
         }
+        
+        const languages = await languagesResponse.json();
+
+        const totalBytes = Object.values(languages).reduce((sum, bytes) => sum + bytes, 0);
+        const languagesWithPercentages = Object.entries(languages)
+            .map(([language, bytes]) => ({
+                language,
+                percentage: totalBytes ? ((bytes / totalBytes) * 100).toFixed(1) : 0
+            }))
+            .sort((a, b) => b.percentage - a.percentage)
+            .slice(0, 2);
+
+        return {
+            name: repo.name,
+            description: repo.description || 'No description available',
+            html_url: this.getRepoUrlWithBranch(repo),
+            homepage: repo.homepage,
+            languages: languagesWithPercentages,
+            topics: repo.topics || [],
+            stargazers_count: repo.stargazers_count,
+            updated_at: repo.updated_at,
+            pushed_at: repo.pushed_at,
+            is_fork: repo.fork,
+            size: repo.size
+        };
+    } catch (error) {
+        console.warn("Language fetch failed for", repo.name, error);
+        return this.mapRepoToProject(repo);
     }
+}
+
 
     shouldIncludeRepo(repo) {
         return (!repo.fork && !repo.archived) && !this.excludeRepos.includes(repo.name);
