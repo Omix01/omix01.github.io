@@ -257,16 +257,16 @@ class DynamicProjects {
 
 async getRepoWithDetails(repo) {
     try {
-        // ✅ Use only Accept header, remove Cache-Control
-        const languagesResponse = await fetch(repo.languages_url, {
-            headers: { Accept: 'application/vnd.github.mercy-preview+json' }
-        });
-        
+        const proxyUrl = 'https://allorigins.hexlet.app/get?url=';
+        const targetUrl = encodeURIComponent(repo.languages_url);
+
+        const languagesResponse = await fetch(`${proxyUrl}${targetUrl}`);
         if (!languagesResponse.ok) {
             throw new Error(`Languages fetch failed: ${languagesResponse.status}`);
         }
-        
-        const languages = await languagesResponse.json();
+
+        const data = await languagesResponse.json();
+        const languages = JSON.parse(data.contents); // parse GitHub JSON
 
         const totalBytes = Object.values(languages).reduce((sum, bytes) => sum + bytes, 0);
         const languagesWithPercentages = Object.entries(languages)
@@ -295,6 +295,7 @@ async getRepoWithDetails(repo) {
         return this.mapRepoToProject(repo);
     }
 }
+
 
 
     shouldIncludeRepo(repo) {
